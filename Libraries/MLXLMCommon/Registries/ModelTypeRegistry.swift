@@ -34,6 +34,7 @@ open class ModelTypeRegistry: @unchecked Sendable {
         let creator = lock.withLock {
             creators[modelType]
         }
+        print("creator: \(creator)")
         guard let creator else {
             throw ModelFactoryError.unsupportedModelType(modelType)
         }

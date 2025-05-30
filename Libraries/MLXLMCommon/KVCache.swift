@@ -114,16 +114,17 @@ public struct RotatingKVCache: KVCache {
     let groupSize: Int
     let bits: Int
 
-    public init(offset: Int = 0, maxSize: Int? = nil, groupSize: Int, bits: Int) {
+    public init(offset: Int = 0, maxSize: Int = 0, keep: Int) {
         self.offset = offset
         self.maxSize = maxSize
-        self.groupSize = groupSize
-        self.bits = bits
+        self.groupSize = keep
+        self.bits = keep
     }
 
     /// Placeholder: Quantized cache might not update/store state in the same way.
     public func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
-        fatalError("QuantizedKVCache update is not implemented - strategy needed.")
+        print("RotatingKVCache update is not implemented - strategy needed.")
+        return (MLXArray.mlxNone, MLXArray.mlxNone)
     }
 
     /// Placeholder: Quantized cache might not have inner state.
@@ -137,22 +138,6 @@ func createAdditiveCausalMask(n: Int, offset: Int) -> MLXArray {
     return mask * Float32(-1e9)
 }
 
-/// create an attention mask using the parameters from the KVCache.
-///
-/// See also ``MultiHeadAttention/createAdditiveCausalMask(_:dtype:)`` -- same idea
-/// but doesn't honor the cache offset.
-public func createAttentionMask(h: MLXArray, cache: [KVCache]?) -> MLXArray? {
-    let t = h.dim(1)
-    if t > 1 {
-        var offset = 0
-        if let c = cache?.first {
-            offset = c.offset
-        }
-        return createAdditiveCausalMask(n: t, offset: offset)
-            .asType(h.dtype)
-    }
-    return nil
-}
 
 // MARK: - Mask Creation
 
@@ -182,33 +167,52 @@ func createCausalMask(
     return mask
 }
 
+/// create an attention mask using the parameters from the KVCache.
+///
+/// See also ``MultiHeadAttention/createAdditiveCausalMask(_:dtype:)`` -- same idea
+/// but doesn't honor the cache offset.
+@_disfavoredOverload
+public func createAttentionMask(h: MLXArray, cache: [KVCache]?) -> MLXArray? {
+    let t = h.dim(1)
+    if t > 1 {
+        var offset = 0
+        if let c = cache?.first {
+            offset = c.offset
+        }
+        return createAdditiveCausalMask(n: t, offset: offset)
+            .asType(h.dtype)
+    }
+    return nil
+}
+
 /// Creates an attention mask based on input shape and an optional cache.
-func createAttentionMask(
+public func createAttentionMaskFast(
     h: MLXArray,
-    cache: KVCache? = nil,
+    cache: [KVCache]? = nil,
     returnArray: Bool = false
 ) -> MLXFast.ScaledDotProductAttentionMaskMode {
     let T = h.dim(1)
-
+    print("createAttentionMaskFast, returnArray: \(returnArray)")
     if T > 1 {
         var offset = 0
-        var windowSize: Int? = nil
+        var windowSize: Int = 0
         var shouldReturnArray = returnArray
 
-        if let cache = cache {
+        if let cache = cache?.first {
             offset = cache.offset
             // Fixed: Use maxSize from KVCache protocol
             if let maxSize = cache.maxSize {
                 windowSize = maxSize
-                offset = min(windowSize ?? Int.max, offset)
-                shouldReturnArray = shouldReturnArray || (offset + T > (windowSize ?? Int.max))
+                offset = min(windowSize, offset)
+                shouldReturnArray = shouldReturnArray || (offset + T > windowSize)
             }
         }
-
+        
+        print("shouldReturnArray: \(shouldReturnArray)")
         if shouldReturnArray {
             return .array(createCausalMask(N: T, offset: offset, windowSize: windowSize))
         } else {
-            return .causal
+            return .array(createCausalMask(N: T, offset: offset, windowSize: windowSize))
         }
     } else {
         return .none
@@ -229,7 +233,7 @@ func quantizedScaledDotProductAttention(
     mask: MLXArray?,
     groupSize: Int = 64,
     bits: Int = 8
-) throws -> MLXArray {
+) -> MLXArray {
 
     let (B, nQHeads, L, D) = (queries.dim(0), queries.dim(1), queries.dim(2), queries.dim(3))
     let nKVHeads = qKeys.weights.dim(-3)
@@ -293,14 +297,14 @@ func quantizedScaledDotProductAttention(
 }
 
 /// Performs scaled dot-product attention, choosing between quantized and standard versions.
-func scaledDotProductAttention(
+public func scaledDotProductAttention(
     queries: MLXArray,
     keys: Any,
     values: Any,
     cache: KVCache?,
     scale: Float,
     mask: MLXArray?
-) throws -> MLXArray {
+) -> MLXArray {
     // Check if we should use the quantized version
     if let qCache = cache as? QuantizedKVCache,
         let qKeys = keys as? QuantizedTensor,

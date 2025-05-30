@@ -45,6 +45,7 @@ public class LLMTypeRegistry: ModelTypeRegistry, @unchecked Sendable {
             "granite": create(GraniteConfiguration.self, GraniteModel.init),
             "mimo": create(MiMoConfiguration.self, MiMoModel.init),
             "glm4": create(GLM4Configuration.self, GLM4Model.init),
+            "gemma3_text": create(Gemma3TextConfiguration.self, Gemma3TextModel.init),
         ]
     }
 
@@ -210,6 +211,12 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         id: "mlx-community/GLM-4-9B-0414-4bit",
         defaultPrompt: "Why is the sky blue?"
     )
+    
+    static public let gemma3_1b_qat_8bit = ModelConfiguration(
+        id: "mlx-community/gemma-3-1b-it-qat-8bit",
+        defaultPrompt: "Tell me about the history of China.",
+        extraEOSTokens: ["<end_of_turn>"]
+    )
 
     private static func all() -> [ModelConfiguration] {
         [
@@ -239,6 +246,7 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             smolLM_135M_4bit,
             mimo_7b_sft_4bit,
             glm4_9b_4bit,
+            gemma3_1b_qat_8bit
         ]
     }
 

@@ -18,6 +18,7 @@ class MLXService {
     /// List of available models that can be used for generation.
     /// Includes both language models (LLM) and vision-language models (VLM).
     static let availableModels: [LMModel] = [
+        LMModel(name: "gemma3_1b_qat_8bit", configuration: LLMRegistry.gemma3_1b_qat_8bit, type: .llm),
         LMModel(name: "llama3.2:1b", configuration: LLMRegistry.llama3_2_1B_4bit, type: .llm),
         LMModel(name: "qwen2.5:1.5b", configuration: LLMRegistry.qwen2_5_1_5b, type: .llm),
         LMModel(name: "smolLM:135m", configuration: LLMRegistry.smolLM_135M_4bit, type: .llm),
