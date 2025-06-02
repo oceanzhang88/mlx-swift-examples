@@ -204,7 +204,7 @@ public protocol KVCacheDimensionProvider {
 extension LanguageModel where Self: KVCacheDimensionProvider {
     public func newCache(parameters: GenerateParameters?) -> [KVCache] {
         kvHeads.map { n in
-            KVCacheSimple()
+            KVCacheBase()
         }
     }
 }

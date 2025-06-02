@@ -338,14 +338,14 @@ public class Gemma3TextModel: Module, LLMModel {
         var caches = [KVCache]()
         for i in 0..<configuration.hiddenLayers {
             if (i + 1) % configuration.slidingWindowPattern == 0 {
-                caches.append(KVCacheSimple())
+                caches.append(KVCacheBase())
             } else {
                 // Assuming RotatingKVCache is defined elsewhere and takes maxSize & keep
                 // For now, using KVCacheSimple as a placeholder if RotatingKVCache is not available
                 // or if the parameters are not fully defined for it here.
                 // If RotatingKVCache is intended, ensure it's correctly implemented and initialized.
 //                 caches.append(RotatingKVCache(maxSize: configuration.slidingWindow, keep: 0)) // Example params
-                caches.append(KVCacheSimple())
+                caches.append(KVCacheBase())
             }
         }
         return caches

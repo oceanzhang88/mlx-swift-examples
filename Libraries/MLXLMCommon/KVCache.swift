@@ -11,54 +11,56 @@ import MLXOptimizers
 ///
 /// See ``LanguageModel/newCache(parameters:)``
 public protocol KVCache: Evaluatable {
-
+    
     /// get the current offset
     var offset: Int { get }
     var maxSize: Int? { get }
-
+    
     func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray)
+    func isTrimmable() -> Bool
+    func trim(numTokens: Int) -> Int
+}
+
+public extension KVCache {
+    // Default implementation for non-trimmable caches
+    func isTrimmable() -> Bool {
+        return false
+    }
+    
+    func trim(numTokens: Int) -> Int {
+        return 0
+    }
 }
 
 /// See https://github.com/ml-explore/mlx-examples/blob/main/llms/mlx_lm/models/base.py#L11
-public class KVCacheSimple: KVCache, Evaluatable, CustomDebugStringConvertible {
-    var keys: MLXArray?
-    var values: MLXArray?
 
-    public var maxSize: Int? = nil
-    public var offset = 0
-    var step = 256
+// MARK: - KVCache
 
+public class KVCacheBase: KVCache {
+    public var maxSize: Int?
+    
+    public var keys: MLXArray?
+    public var values: MLXArray?
+    public var offset: Int = 0
+    var step: Int = 256
+    
     public init() {}
-
-    public func innerState() -> [MLXArray] {
-        [self.keys, self.values].compactMap { $0 }
-    }
-
+    
     public func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
-        let previous = self.offset
-
-        let reset =
-            if let currentKeys = self.keys, (previous + keys.dim(2)) > currentKeys.dim(2) {
-                true
-            } else {
-                self.keys == nil
-            }
-        if reset {
-            let B = keys.dim(0)
-            let kvHeads = keys.dim(1)
-            let kHeadDim = keys.dim(3)
+        let prev = offset
+        if self.keys == nil || (prev + keys.dim(2)) > self.keys!.dim(2) {
+            let (b, nKvHeads, _, kHeadDim) = keys.shape4
             let vHeadDim = values.dim(3)
-
             let nSteps = (step + keys.dim(2) - 1) / step
-            let kShape = [B, kvHeads, nSteps * step, kHeadDim]
-            let vShape = [B, kvHeads, nSteps * step, vHeadDim]
+            let kShape = [b, nKvHeads, nSteps * step, kHeadDim]
+            let vShape = [b, nKvHeads, nSteps * step, vHeadDim]
             let newK = MLXArray.zeros(kShape, dtype: keys.dtype)
             let newV = MLXArray.zeros(vShape, dtype: values.dtype)
-
+            
             if var currentKeys = self.keys, var currentValues = self.values {
-                if previous % step != 0 {
-                    currentKeys = currentKeys[.ellipsis, ..<previous, 0...]
-                    currentValues = currentValues[.ellipsis, ..<previous, 0...]
+                if prev % step != 0 {
+                    currentKeys = currentKeys[.ellipsis, ..<prev, 0...]
+                    currentValues = currentValues[.ellipsis, ..<prev, 0...]
                 }
                 self.keys = concatenated([currentKeys, newK], axis: 2)
                 self.values = concatenated([currentValues, newV], axis: 2)
@@ -67,77 +69,292 @@ public class KVCacheSimple: KVCache, Evaluatable, CustomDebugStringConvertible {
                 self.values = newV
             }
         }
-
-        self.offset += keys.dim(2)
-
-        self.keys?[.ellipsis, previous ..< self.offset, 0...] = keys
-        self.values?[.ellipsis, previous ..< self.offset, 0...] = values
-
-        return (
-            self.keys![.ellipsis, ..<self.offset, 0...],
-            self.values![.ellipsis, ..<self.offset, 0...]
-        )
+        
+        offset += keys.dim(2)
+        self.keys?[.ellipsis, prev ..< offset, 0...] = keys
+        self.values?[.ellipsis, prev ..< offset, 0...] = values
+        
+        return (self.keys![.ellipsis, ..<offset, 0...], self.values![.ellipsis, ..<offset, 0...])
     }
-
-    public var debugDescription: String {
-        "\(String(describing: Self.self)) \(Unmanaged.passUnretained(self).toOpaque()), offset: \(offset), step: \(step), keys: \(keys?.shape.description ?? "-"), values: \(values?.shape.description ?? "-")"
+    
+    public func innerState() -> [MLX.MLXArray] {
+        [self.keys, self.values].compactMap { $0 }
+    }
+    
+    public func isTrimmable() -> Bool {
+        return true
+    }
+    
+    public func trim(numTokens n: Int) -> Int {
+        let trimmedCount = min(offset, n)
+        offset -= trimmedCount
+        return trimmedCount
+    }
+    
+    public func toQuantized(groupSize: Int = 64, bits: Int = 4) -> QuantizedKVCache {
+        let quantCache = QuantizedKVCache(groupSize: groupSize, bits: bits)
+        quantCache.offset = offset
+        if let k = keys, let v = values {
+            quantCache.keys = MLX.quantized(k, groupSize: groupSize, bits: bits)
+            quantCache.values = MLX.quantized(v, groupSize: groupSize, bits: bits)
+        }
+        return quantCache
     }
 }
 
-/// A placeholder KVCache for quantized models (Added missing type)
-public struct QuantizedKVCache: KVCache {
-    public var offset: Int
+
+// MARK: - QuantizedKVCache
+
+public class QuantizedKVCache: KVCache {
     public var maxSize: Int?
+    
+    public var keys: (MLXArray, MLXArray, MLXArray)?
+    public var values: (MLXArray, MLXArray, MLXArray)?
+    public var offset: Int = 0
+    var step: Int = 256
     let groupSize: Int
     let bits: Int
-
-    public init(offset: Int = 0, maxSize: Int? = nil, groupSize: Int, bits: Int) {
-        self.offset = offset
-        self.maxSize = maxSize
+    
+    public init(groupSize: Int = 64, bits: Int = 8) {
         self.groupSize = groupSize
         self.bits = bits
     }
-
-    /// Placeholder: Quantized cache might not update/store state in the same way.
+    
     public func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
-        fatalError("QuantizedKVCache update is not implemented - strategy needed.")
-    }
-
-    /// Placeholder: Quantized cache might not have inner state.
-    public func innerState() -> [MLXArray] { [] }
-}
-
-/// A placeholder KVCache for quantized models (Added missing type)
-public struct RotatingKVCache: KVCache {
-    public var offset: Int
-    public var maxSize: Int?
-    let groupSize: Int
-    let bits: Int
-
-    public init(offset: Int = 0, maxSize: Int = 0, keep: Int) {
-        self.offset = offset
-        self.maxSize = maxSize
-        self.groupSize = keep
-        self.bits = keep
-    }
-
-    /// Placeholder: Quantized cache might not update/store state in the same way.
-    public func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
-        print("RotatingKVCache update is not implemented - strategy needed.")
+        let (b, nKvHeads, numSteps, kHeadDim) = keys.shape4
+        let vHeadDim = values.dim(-1)
+        let prev = offset
+        
+        //        if self.keys == nil || (prev + numSteps) > self.keys!.0.dim(-2) {
+        //            let elPerInt = 8 * MLXArray.UInt32Scalar.scalarSize / bits
+        //            let newSteps = (step + numSteps - 1) / step * step
+        //            let shape = [b, nKvHeads, newSteps]
+        //
+        //            func initQuant(dim: Int) -> (MLXArray, MLXArray, MLXArray) {
+        //                return (
+        //                    MLXArray.zeros(shape + [dim / elPerInt], type: .uint32),
+        //                    MLXArray.zeros(shape + [dim / groupSize], type: keys.dtype),
+        //                    MLXArray.zeros(shape + [dim / groupSize], type: keys.dtype)
+        //                )
+        //            }
+        //
+        //            func expandQuant(current: (MLXArray, MLXArray, MLXArray)?) -> (MLXArray, MLXArray, MLXArray) {
+        //                guard let current = current else {
+        //                    // This case should ideally be handled by the outer `if self.keys == nil`
+        //                    // For safety, re-initialize if current is nil, though this might indicate a logic error.
+        //                    let dim = currentKeys == nil ? kHeadDim : vHeadDim // Simplified logic, needs context
+        //                    return initQuant(dim: dim)
+        //                }
+        //                let newShapeSuffix = current.0.shape.suffix(from: current.0.ndim - 1) // Gets the last dimension
+        //                let newX0 = MLXArray.zeros([shape[0], shape[1], shape[2]] + newShapeSuffix, type: current.0.dtype)
+        //                let newX1 = MLXArray.zeros([shape[0], shape[1], shape[2]] + newShapeSuffix, type: current.1.dtype)
+        //                let newX2 = MLXArray.zeros([shape[0], shape[1], shape[2]] + newShapeSuffix, type: current.2.dtype)
+        //
+        //
+        //                return (
+        //                    concatenated([current.0, newX0], axis: -2),
+        //                    concatenated([current.1, newX1], axis: -2),
+        //                    concatenated([current.2, newX2], axis: -2)
+        //                )
+        //            }
+        //
+        //
+        //            if var currentKeys = self.keys, var currentValues = self.values {
+        //                 if prev % step != 0 {
+        //                    currentKeys = (
+        //                        currentKeys.0[.ellipsis, ..<prev, 0...],
+        //                        currentKeys.1[.ellipsis, ..<prev, 0...],
+        //                        currentKeys.2[.ellipsis, ..<prev, 0...]
+        //                    )
+        //                    currentValues = (
+        //                        currentValues.0[.ellipsis, ..<prev, 0...],
+        //                        currentValues.1[.ellipsis, ..<prev, 0...],
+        //                        currentValues.2[.ellipsis, ..<prev, 0...]
+        //                    )
+        //                }
+        //                self.keys = expandQuant(current: currentKeys)
+        //                self.values = expandQuant(current: currentValues)
+        //            } else {
+        //                self.keys = initQuant(dim: kHeadDim)
+        //                self.values = initQuant(dim: vHeadDim)
+        //            }
+        //        }
+        //
+        //        offset += numSteps
+        //
+        //        let quantizedKeys = MLX.quantized(keys, groupSize: groupSize, bits: bits)
+        //        let quantizedValues = MLX.quantized(values, groupSize: groupSize, bits: bits)
+        //
+        //        self.keys!.0[.ellipsis, prev ..< offset, 0...] = quantizedKeys.0
+        //        self.keys!.1[.ellipsis, prev ..< offset, 0...] = quantizedKeys.1
+        //        self.keys!.2[.ellipsis, prev ..< offset, 0...] = quantizedKeys.2
+        //
+        //        self.values!.0[.ellipsis, prev ..< offset, 0...] = quantizedValues.0
+        //        self.values!.1[.ellipsis, prev ..< offset, 0...] = quantizedValues.1
+        //        self.values!.2[.ellipsis, prev ..< offset, 0...] = quantizedValues.2
+        //
+        //        return (
+        //            (self.keys!.0[.ellipsis, ..<offset, 0...],
+        //             self.keys!.1[.ellipsis, ..<offset, 0...],
+        //             self.keys!.2[.ellipsis, ..<offset, 0...]),
+        //            (self.values!.0[.ellipsis, ..<offset, 0...],
+        //             self.values!.1[.ellipsis, ..<offset, 0...],
+        //             self.values!.2[.ellipsis, ..<offset, 0...])
+        //        )
         return (MLXArray.mlxNone, MLXArray.mlxNone)
     }
-
-    /// Placeholder: Quantized cache might not have inner state.
-    public func innerState() -> [MLXArray] { [] }
+    
+    public func innerState() -> [MLX.MLXArray] {
+        //        [self.keys, self.values].compactMap { $0 }
+        []
+    }
+    
+    public func isTrimmable() -> Bool {
+        return true
+    }
+    
+    public func trim(numTokens n: Int) -> Int {
+        let trimmedCount = min(offset, n)
+        offset -= trimmedCount
+        return trimmedCount
+    }
 }
 
-func createAdditiveCausalMask(n: Int, offset: Int) -> MLXArray {
-    let rinds = MLXArray(Int32(0) ..< Int32(offset + n))
-    let linds = offset != 0 ? MLXArray(Int32(offset) ..< Int32(offset + n)) : rinds
-    let mask = linds[0..., .newAxis] .< rinds[.newAxis]
-    return mask * Float32(-1e9)
-}
+// MARK: - RotatingKVCache
 
+public class RotatingKVCache: KVCache {
+    public var keys: MLXArray?
+    public var values: MLXArray?
+    public var offset: Int = 0
+    var keep: Int
+    public var maxSize: Int?
+    var step: Int = 256
+    private var idx: Int = 0
+    
+    public init(maxSize: Int?, keep: Int = 0, step: Int = 256) {
+        self.maxSize = maxSize
+        self.keep = keep
+        self.step = step
+    }
+    
+    private func trimArray(_ arr: MLXArray?, trimSize: Int, append: MLXArray? = nil) -> MLXArray? {
+        guard var currentArr = arr else { return append }
+        var toCat = [MLXArray]()
+        if trimSize > 0 {
+            toCat.append(currentArr[.ellipsis, ..<keep, 0...])
+            toCat.append(currentArr[.ellipsis, (trimSize + keep)..., 0...])
+        } else {
+            toCat.append(currentArr)
+        }
+        if let appendArr = append {
+            toCat.append(appendArr)
+        }
+        return concatenated(toCat, axis: 2)
+    }
+    
+    private func temporalOrder(_ arr: MLXArray?) -> MLXArray? {
+        guard var currentArr = arr else { return nil }
+        if idx == currentArr.dim(2) {
+            return currentArr
+        } else if idx < offset {
+            return concatenated(
+                [
+                    currentArr[.ellipsis, ..<keep, 0...],
+                    currentArr[.ellipsis, idx..., 0...],
+                    currentArr[.ellipsis, keep..<idx, 0...],
+                ],
+                axis: 2
+            )
+        } else {
+            return currentArr[.ellipsis, ..<idx, 0...]
+        }
+    }
+    
+    private func updateConcat(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
+        if self.keys == nil {
+            self.keys = keys
+            self.values = values
+        } else {
+            self.keys = temporalOrder(self.keys)
+            self.values = temporalOrder(self.values)
+            
+            let trimSize = idx - (maxSize ?? idx)
+            self.keys = trimArray(self.keys, trimSize: trimSize, append: keys)
+            self.values = trimArray(self.values, trimSize: trimSize, append: values)
+        }
+        offset += keys.dim(2)
+        idx = self.keys!.dim(2)
+        return (self.keys!, self.values!)
+    }
+    
+    private func updateInPlace(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
+        let (b, nKvHeads, s, kHeadDim) = keys.shape4
+        let prev = offset
+        
+        if self.keys == nil || (prev >= self.keys!.dim(2) && self.keys!.dim(2) < (maxSize ?? Int.max)) {
+            let vHeadDim = values.dim(3)
+            let newSize = min(step, (maxSize ?? Int.max) - prev)
+            let kShape = [b, nKvHeads, newSize, kHeadDim]
+            let vShape = [b, nKvHeads, newSize, vHeadDim]
+            let newK = MLXArray.zeros(kShape, dtype: keys.dtype)
+            let newV = MLXArray.zeros(vShape, dtype: values.dtype)
+            
+            if var currentKeys = self.keys, var currentValues = self.values {
+                self.keys = concatenated([currentKeys, newK], axis: 2)
+                self.values = concatenated([currentValues, newV], axis: 2)
+            } else {
+                self.keys = newK
+                self.values = newV
+            }
+            idx = prev
+        }
+        
+        if let currentMaxSize = maxSize {
+            let trimSize = self.keys!.dim(2) - currentMaxSize
+            if trimSize > 0 {
+                self.keys = trimArray(self.keys, trimSize: trimSize)
+                self.values = trimArray(self.values, trimSize: trimSize)
+                idx = currentMaxSize
+            }
+        }
+        
+        if let currentMaxSize = maxSize, idx == currentMaxSize {
+            idx = keep
+        }
+        
+        self.keys?[.ellipsis, idx ..< (idx + s), 0...] = keys
+        self.values?[.ellipsis, idx ..< (idx + s), 0...] = values
+        offset += s
+        idx += s
+        
+        if offset < (maxSize ?? Int.max) {
+            return (self.keys![.ellipsis, ..<offset, 0...], self.values![.ellipsis, ..<offset, 0...])
+        }
+        return (self.keys!, self.values!)
+    }
+    
+    public func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
+        if keys.dim(2) == 1 {
+            return updateInPlace(keys: keys, values: values)
+        }
+        return updateConcat(keys: keys, values: values)
+    }
+    
+    public func innerState() -> [MLX.MLXArray] {
+        [self.keys, self.values].compactMap { $0 }
+    }
+    
+    public func isTrimmable() -> Bool {
+        return maxSize == nil || offset < maxSize!
+    }
+    
+    public func trim(numTokens n: Int) -> Int {
+        let trimmedCount = min(offset, n)
+        offset -= trimmedCount
+        idx -= trimmedCount
+        return trimmedCount
+    }
+}
 
 // MARK: - Mask Creation
 
@@ -152,18 +369,18 @@ func createCausalMask(
     var linds = (offset > 0) ? MLXArray(offset ..< (offset + N)) : rinds
     linds = linds.expandedDimensions(axes: [-1])
     let rindsExpanded = rinds.expandedDimensions(axes: [0])
-
+    
     var mask = linds .>= rindsExpanded
-
+    
     if let windowSize = windowSize {
         mask = mask .&& (linds .<= rindsExpanded + windowSize)
     }
-
+    
     if var lengths = lengths {
         lengths = lengths.expandedDimensions(axes: [-1, -1, -1])
         mask = mask .&& (rindsExpanded .< lengths)
     }
-
+    
     return mask
 }
 
@@ -179,7 +396,7 @@ public func createAttentionMask(h: MLXArray, cache: [KVCache]?) -> MLXArray? {
         if let c = cache?.first {
             offset = c.offset
         }
-        return createAdditiveCausalMask(n: t, offset: offset)
+        return createCausalMask(N: t, offset: offset)
             .asType(h.dtype)
     }
     return nil
@@ -197,7 +414,7 @@ public func createAttentionMaskFast(
         var offset = 0
         var windowSize: Int = 0
         var shouldReturnArray = returnArray
-
+        
         if let cache = cache?.first {
             offset = cache.offset
             // Fixed: Use maxSize from KVCache protocol
@@ -234,15 +451,15 @@ func quantizedScaledDotProductAttention(
     groupSize: Int = 64,
     bits: Int = 8
 ) -> MLXArray {
-
+    
     let (B, nQHeads, L, D) = (queries.dim(0), queries.dim(1), queries.dim(2), queries.dim(3))
     let nKVHeads = qKeys.weights.dim(-3)
     let nRepeats = nQHeads / nKVHeads
-
+    
     var currentQueries = queries * scale
     var currentQKeys = qKeys
     var currentQValues = qValues
-
+    
     if nRepeats > 1 {
         currentQueries = currentQueries.reshaped(B, nKVHeads, nRepeats, L, D)
         currentQKeys = (
@@ -256,7 +473,7 @@ func quantizedScaledDotProductAttention(
             qValues.biases.expandedDimensions(axes: [-3])
         )
     }
-
+    
     var scores = try MLX.quantizedMatmul(
         currentQueries, currentQKeys.weights,
         scales: currentQKeys.scales,
@@ -265,7 +482,7 @@ func quantizedScaledDotProductAttention(
         groupSize: groupSize,
         bits: bits
     )
-
+    
     if let currentMask = mask {
         if currentMask.dtype == .bool {
             // Fixed: Create fill value as MLXArray and use MLX.where without labels
@@ -277,9 +494,9 @@ func quantizedScaledDotProductAttention(
             scores = scores + currentMask
         }
     }
-
+    
     scores = MLX.softmax(scores, axis: -1, precise: true)
-
+    
     var out = try MLX.quantizedMatmul(
         scores, currentQValues.weights,
         scales: currentQValues.scales,
@@ -288,11 +505,11 @@ func quantizedScaledDotProductAttention(
         groupSize: groupSize,
         bits: bits
     )
-
+    
     if nRepeats > 1 {
         out = out.reshaped(B, nQHeads, L, D)
     }
-
+    
     return out
 }
 
@@ -307,8 +524,8 @@ public func scaledDotProductAttention(
 ) -> MLXArray {
     // Check if we should use the quantized version
     if let qCache = cache as? QuantizedKVCache,
-        let qKeys = keys as? QuantizedTensor,
-        let qValues = values as? QuantizedTensor
+       let qKeys = keys as? QuantizedTensor,
+       let qValues = values as? QuantizedTensor
     {
         return try quantizedScaledDotProductAttention(
             queries: queries,
@@ -330,3 +547,4 @@ public func scaledDotProductAttention(
             "Unsupported key/value types or cache combination for scaledDotProductAttention.")
     }
 }
+
