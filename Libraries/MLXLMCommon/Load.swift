@@ -100,6 +100,3 @@ public func loadWeights(
 
     eval(model)
 }
-
-// TODO remove once mlx-swift update is adopted
-

@@ -62,7 +62,7 @@ private enum Language {
         }
 
         public func callAsFunction(
-            _ x: MLXArray, mask: MLXArray? = nil, cache: KVCache?
+            _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
         ) -> MLXArray {
             let (B, L) = (x.dim(0), x.dim(1))
 
@@ -129,7 +129,7 @@ private enum Language {
         }
 
         public func callAsFunction(
-            _ x: MLXArray, mask: MLXArray? = nil, cache: KVCache?
+            _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?
         ) -> MLXArray {
             var r = attention(inputLayerNorm(x), mask: mask, cache: cache)
             let h = x + r
@@ -170,11 +170,11 @@ private enum Language {
             var h = inputEmbedding ?? embedTokens(inputs)
             h = h * hiddenScale
 
-            let mask: MLXArray? =
+            let mask =
                 if mask == nil || (cache?[0].offset ?? 0) > 0 {
                     createAttentionMask(h: h, cache: cache)
                 } else {
-                    nil
+                    MLXFast.ScaledDotProductAttentionMaskMode.none
                 }
 
             for (i, layer) in layers.enumerated() {

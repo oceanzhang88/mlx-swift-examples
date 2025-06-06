@@ -1,6 +1,8 @@
 import Foundation
 import MLX
+import MLXFast
 import MLXNN
+import MLXRandom
 
 // Port of https://github.com/ml-explore/mlx-examples/blob/main/llms/mlx_lm/models/switch_layers.py
 
@@ -129,7 +131,9 @@ class SwitchLinear: Module, Quantizable {
         self._bias.wrappedValue = bias
     }
 
-    func callAsFunction(_ x: MLXArray, _ indices: MLXArray, sortedIndices: Bool = false) -> MLXArray {
+    func callAsFunction(
+        _ x: MLXArray, _ indices: MLXArray, sortedIndices: Bool = false
+    ) -> MLXArray {
         let weightT = self.weight.swappedAxes(-1, -2)
         var result = MLX.gatherMatmul(x, weightT, rhsIndices: indices, sortedIndices: sortedIndices)
 
@@ -169,7 +173,9 @@ class QuantizedSwitchLinear: SwitchLinear, Quantized {
         self.freeze()
     }
 
-    override func callAsFunction(_ x: MLXArray, _ indices: MLXArray, sortedIndices: Bool = false) -> MLXArray {
+    override func callAsFunction(
+        _ x: MLXArray, _ indices: MLXArray, sortedIndices: Bool = false
+    ) -> MLXArray {
         var result = MLX.gatherQuantizedMatmul(
             x,
             self.weight,
